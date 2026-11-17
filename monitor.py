@@ -1,64 +1,63 @@
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime
-
+import json
+from pathlib import Path
 import psutil
+from datetime import datetime
+from models import SystemMetric, DatabaseManager
 
-
-@dataclass
-class Metric:
-    timestamp: str
-    cpu_percent: float
-    memory_percent: float
-    disk_usage: float
-    status: str
-
+CONFIG_PATH = Path("config.json")
+ALERT_LOG_PATH = Path("nexus_alerts.log")
 
 class MetricsCollector:
-    """Collects system metrics asynchronously.
+    def __init__(self, interval: float = None, db = None, **kwargs):
+        self.config = self._load_config()
+        self.interval = interval if interval is not None else self.config.get("interval", 1.5)
+        self.db = db if db is not None else DatabaseManager()
 
-    The blocking psutil calls are off-loaded to a worker thread via
-    asyncio.to_thread so the Rich Live display stays responsive.
-    """
+    def _load_config(self) -> dict:
+        """Loads configuration from config.json or falls back to safe defaults."""
+        default_config = {
+            "interval": 1.5,
+            "cpu_warning": 60.0,
+            "cpu_critical": 85.0,
+            "memory_warning": 75.0,
+            "memory_critical": 90.0,
+            "disk_critical": 90.0
+        }
+        if CONFIG_PATH.exists():
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    return {**default_config, **json.load(f)}
+            except Exception:
+                return default_config
+        return default_config
 
-    def __init__(self, interval: float = 1.5, db=None):
-        self.interval = interval
-        self.db = db  # optional DatabaseManager for persistence
-        # Prime CPU measurement (first call returns 0.0)
-        psutil.cpu_percent(interval=None)
+    def _log_alert(self, message: str):
+        """Appends system warnings and critical alerts to a local log file."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(ALERT_LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(f"[{timestamp}] {message}\n")
 
-    def _read_metrics(self) -> Metric:
+    async def gather_metrics(self) -> SystemMetric:
         cpu = psutil.cpu_percent(interval=None)
         memory = psutil.virtual_memory().percent
-        disk = psutil.disk_usage("/").percent
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if cpu >= 85 or memory >= 85 or disk >= 90:
+        disk = psutil.disk_usage('/').percent
+        
+        status = "HEALTHY"
+        if cpu >= self.config["cpu_critical"] or memory >= self.config["memory_critical"] or disk >= self.config["disk_critical"]:
             status = "CRITICAL"
-        elif cpu >= 70 or memory >= 70 or disk >= 80:
+            self._log_alert(f"CRITICAL SPIKE DETECTED -> CPU: {cpu}%, MEM: {memory}%, DISK: {disk}%")
+        elif cpu >= self.config["cpu_warning"] or memory >= self.config["memory_warning"]:
             status = "WARNING"
-        else:
-            status = "HEALTHY"
+            self._log_alert(f"WARNING THRESHOLD REACHED -> CPU: {cpu}%, MEM: {memory}%")
 
-        return Metric(
-            timestamp=ts,
-            cpu_percent=round(cpu, 1),
-            memory_percent=round(memory, 1),
-            disk_usage=round(disk, 1),
-            status=status,
+        metric = SystemMetric(
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            cpu_percent=cpu,
+            memory_percent=memory,
+            disk_usage=disk,
+            status=status
         )
-
-    async def gather_metrics(self) -> Metric:
-        # Non-blocking: run the synchronous psutil snapshot in a thread
-        metric = await asyncio.to_thread(self._read_metrics)
-
-        if self.db is not None:
-            await asyncio.to_thread(
-                self.db.insert_metric,
-                metric.timestamp,
-                metric.cpu_percent,
-                metric.memory_percent,
-                metric.disk_usage,
-                metric.status,
-            )
+        
+        self.db.save_metric(metric)
         return metric

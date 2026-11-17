@@ -1,0 +1,8 @@
+{
+    "interval": 1.5,
+    "cpu_warning": 60.0,
+    "cpu_critical": 85.0,
+    "memory_warning": 75.0,
+    "memory_critical": 90.0,
+    "disk_critical": 90.0,
+}
