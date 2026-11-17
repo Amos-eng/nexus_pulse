@@ -5,3 +5,5 @@ Pygments==2.21.0
 rich==15.0.0
 pytest
 pytest-asyncio
+fastapi
+uvicorn  
