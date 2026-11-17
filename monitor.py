@@ -1,32 +1,64 @@
 import asyncio
-import psutil
+from dataclasses import dataclass
 from datetime import datetime
-from models import SystemMetric, DatabaseManager
+
+import psutil
+
+
+@dataclass
+class Metric:
+    timestamp: str
+    cpu_percent: float
+    memory_percent: float
+    disk_usage: float
+    status: str
 
 
 class MetricsCollector:
-    def __init__(self, interval: float = 2.0):
-        self.interval = interval
-        self.db = DatabaseManager()
+    """Collects system metrics asynchronously.
 
-    async def gather_metrics(self) -> SystemMetric:
+    The blocking psutil calls are off-loaded to a worker thread via
+    asyncio.to_thread so the Rich Live display stays responsive.
+    """
+
+    def __init__(self, interval: float = 1.5, db=None):
+        self.interval = interval
+        self.db = db  # optional DatabaseManager for persistence
+        # Prime CPU measurement (first call returns 0.0)
+        psutil.cpu_percent(interval=None)
+
+    def _read_metrics(self) -> Metric:
         cpu = psutil.cpu_percent(interval=None)
         memory = psutil.virtual_memory().percent
         disk = psutil.disk_usage("/").percent
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        status = "HEALTHY"
-        if cpu > 85.0 or memory > 90.0:
+        if cpu >= 85 or memory >= 85 or disk >= 90:
             status = "CRITICAL"
-        elif cpu > 60.0 or memory > 75.0:
+        elif cpu >= 70 or memory >= 70 or disk >= 80:
             status = "WARNING"
+        else:
+            status = "HEALTHY"
 
-        metric = SystemMetric(
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            cpu_percent=cpu,
-            memory_percent=memory,
-            disk_usage=disk,
+        return Metric(
+            timestamp=ts,
+            cpu_percent=round(cpu, 1),
+            memory_percent=round(memory, 1),
+            disk_usage=round(disk, 1),
             status=status,
         )
 
-        self.db.save_metric(metric)
+    async def gather_metrics(self) -> Metric:
+        # Non-blocking: run the synchronous psutil snapshot in a thread
+        metric = await asyncio.to_thread(self._read_metrics)
+
+        if self.db is not None:
+            await asyncio.to_thread(
+                self.db.insert_metric,
+                metric.timestamp,
+                metric.cpu_percent,
+                metric.memory_percent,
+                metric.disk_usage,
+                metric.status,
+            )
         return metric
